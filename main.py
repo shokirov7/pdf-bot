@@ -19,7 +19,7 @@ BOT_TOKEN = "8204701331:AAGk63tYGLDBqSHkCs3Z-e_h3cFUy7bqkGQ"
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=None))
 dp = Dispatcher()
 
-# user_id -> {"images": [file_id, ...], "names": [orig_name_or_None, ...], "msg_id": int, "chat_id": int}
+# user_id -> {"images": [file_id, ...], "msg_id": int, "chat_id": int}
 user_sessions: dict[int, dict] = {}
 
 
@@ -51,15 +51,13 @@ def build_keyboard(count: int) -> InlineKeyboardMarkup:
 async def handle_image(message: Message):
     user_id = message.from_user.id
 
-    # Detect file_id and original name
+    # Detect file_id
     if message.photo:
         photo = message.photo[-1]
         file_id = photo.file_id
-        orig_name = None  # у фото в Telegram нет имени файла, потом возьмём из file_path
     else:
         doc = message.document
         file_id = doc.file_id
-        orig_name = doc.file_name or None  # тут нормальное имя файла
 
     session = user_sessions.get(user_id)
 
@@ -71,14 +69,12 @@ async def handle_image(message: Message):
         )
         user_sessions[user_id] = {
             "images": [file_id],
-            "names": [orig_name],
             "msg_id": msg.message_id,
             "chat_id": msg.chat.id,
         }
     else:
         # Add another image
         session["images"].append(file_id)
-        session["names"].append(orig_name)
         count = len(session["images"])
 
         old_msg_id = session["msg_id"]
@@ -108,11 +104,8 @@ async def delete_last_image(callback: CallbackQuery):
         await callback.answer("There are no images to delete.", show_alert=True)
         return
 
-    # Remove last image + имя
+    # Remove last image
     session["images"].pop()
-    if "names" in session and session["names"]:
-        session["names"].pop()
-
     count = len(session["images"])
     old_msg_id = session["msg_id"]
     chat_id = session["chat_id"]
@@ -158,7 +151,6 @@ async def create_pdf(callback: CallbackQuery):
     await callback.answer("Creating PDF...")
 
     images_ids = session["images"]
-    names = session.get("names", [])
     chat_id = session["chat_id"]
     msg_id = session["msg_id"]
 
@@ -170,34 +162,10 @@ async def create_pdf(callback: CallbackQuery):
     try:
         images: list[Image.Image] = []
 
-        # Сначала получаем мету по файлам
-        files_meta = []
-        for file_id in images_ids:
-            f = await bot.get_file(file_id)
-            files_meta.append(f)
-
-        # ---------- ГЕНЕРАЦИЯ ИМЕНИ PDF ----------
-        pdf_filename = "document.pdf"
-
-        # 1) пробуем взять из оригинального имени первой картинки/дока
-        base_name = None
-        if names and names[0]:
-            base_name = names[0].rsplit(".", 1)[0]
-
-        # 2) если имя не пришло (фото), берём из file_path
-        if not base_name:
-            file_path = files_meta[0].file_path or ""
-            if file_path:
-                base_name = file_path.split("/")[-1].rsplit(".", 1)[0]
-            else:
-                base_name = "document"
-
-        pdf_filename = base_name + ".pdf"
-        # -----------------------------------------
-
         # Download all images
-        for f in files_meta:
-            downloaded = await bot.download_file(f.file_path)
+        for file_id in images_ids:
+            file = await bot.get_file(file_id)
+            downloaded = await bot.download_file(file.file_path)
             img = Image.open(downloaded).convert("RGB")
             images.append(img)
 
@@ -213,7 +181,7 @@ async def create_pdf(callback: CallbackQuery):
         pdf_io.seek(0)
 
         pdf_bytes = pdf_io.getvalue()
-        pdf_file = BufferedInputFile(pdf_bytes, filename=pdf_filename)
+        pdf_file = BufferedInputFile(pdf_bytes, filename="document.pdf")
 
         # Thumbnail
         thumb_img = first.copy()
