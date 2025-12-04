@@ -17,12 +17,13 @@ from aiogram.client.default import DefaultBotProperties
 from PIL import Image
 
 # 🔑 YOUR BOT TOKEN
-BOT_TOKEN = "8204701331:AAFIbq9WjX9gmy_JQ3cgoTBGGU9v4zKK5Fo"
+BOT_TOKEN = "8204701331:AAGk63tYGLDBqSHkCs3Z-e_h3cFUy7bqkGQ"
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=None))
 dp = Dispatcher()
 
-# user_id -> {"images": [file_id, ...], "msg_id": int, "chat_id": int}
+# ✅ Теперь сессии по chat_id, а не по user_id
+# chat_id -> {"images": [file_id, ...], "msg_id": int}
 user_sessions: dict[int, dict] = {}
 
 
@@ -71,7 +72,7 @@ def build_keyboard(count: int) -> InlineKeyboardMarkup:
 
 @dp.message(F.photo | (F.document & F.document.mime_type.startswith("image/")))
 async def handle_image(message: Message):
-    user_id = message.from_user.id
+    chat_id = message.chat.id
 
     # Detect file_id
     if message.photo:
@@ -81,46 +82,43 @@ async def handle_image(message: Message):
         doc = message.document
         file_id = doc.file_id
 
-    session = user_sessions.get(user_id)
+    session = user_sessions.get(chat_id)
 
     if session is None:
-        # First image — create session and message
+        # Первая картинка в этом чате
         msg = await message.answer(
             build_summary_text(1),
             reply_markup=build_keyboard(1),
         )
-        user_sessions[user_id] = {
+        user_sessions[chat_id] = {
             "images": [file_id],
             "msg_id": msg.message_id,
-            "chat_id": msg.chat.id,
         }
     else:
-        # Add another image
+        # Добавляем картинку в уже существующую сессию
         session["images"].append(file_id)
         count = len(session["images"])
-
         old_msg_id = session["msg_id"]
 
-        # Send NEW summary message with updated counter
+        # Новое сообщение с обновлённым количеством
         new_msg = await message.answer(
             build_summary_text(count),
             reply_markup=build_keyboard(count),
         )
 
         session["msg_id"] = new_msg.message_id
-        session["chat_id"] = new_msg.chat.id
 
-        # Delete old summary message
+        # Удаляем старое сообщение-суммарку
         try:
-            await bot.delete_message(chat_id=message.chat.id, message_id=old_msg_id)
+            await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
         except Exception as e:
             print("Delete old summary error:", e)
 
 
 @dp.callback_query(F.data == "delete_last")
 async def delete_last_image(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    session = user_sessions.get(user_id)
+    chat_id = callback.message.chat.id
+    session = user_sessions.get(chat_id)
 
     if not session or not session["images"]:
         await callback.answer("There are no images to delete.", show_alert=True)
@@ -130,11 +128,10 @@ async def delete_last_image(callback: CallbackQuery):
     session["images"].pop()
     count = len(session["images"])
     old_msg_id = session["msg_id"]
-    chat_id = session["chat_id"]
 
     if count == 0:
-        # Session empty — reset everything
-        user_sessions.pop(user_id, None)
+        # Сессия пустая — очищаем
+        user_sessions.pop(chat_id, None)
         try:
             await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
         except Exception as e:
@@ -144,15 +141,13 @@ async def delete_last_image(callback: CallbackQuery):
             "All images have been removed. Send a new image to start again."
         )
     else:
-        # Send updated summary message
+        # Обновляем суммарку
         new_msg = await callback.message.answer(
             build_summary_text(count),
             reply_markup=build_keyboard(count),
         )
         session["msg_id"] = new_msg.message_id
-        session["chat_id"] = new_msg.chat.id
 
-        # Delete old summary
         try:
             await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
         except Exception as e:
@@ -163,8 +158,8 @@ async def delete_last_image(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "create_pdf")
 async def create_pdf(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    session = user_sessions.get(user_id)
+    chat_id = callback.message.chat.id
+    session = user_sessions.get(chat_id)
 
     if not session or not session["images"]:
         await callback.answer("No images to create a document.", show_alert=True)
@@ -173,7 +168,6 @@ async def create_pdf(callback: CallbackQuery):
     await callback.answer("Creating PDF...")
 
     images_ids = session["images"]
-    chat_id = session["chat_id"]
     msg_id = session["msg_id"]
 
     # Waiting message
@@ -234,7 +228,7 @@ async def create_pdf(callback: CallbackQuery):
         except Exception:
             pass
     finally:
-        user_sessions.pop(user_id, None)
+        user_sessions.pop(chat_id, None)
 
 
 @dp.message()
@@ -253,4 +247,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
