@@ -16,7 +16,7 @@ from aiogram.client.default import DefaultBotProperties
 from PIL import Image
 
 # 🔑 YOUR BOT TOKEN
-BOT_TOKEN = "8204701331:AAEDVsdd3bwm7dTxzDdgM0vZkQLhCkYcZwE"
+BOT_TOKEN = "8204701331:AAG3kEMIYsgSTsAmofn-bAYjZpDaXyn8iSY"
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=None))
 dp = Dispatcher()
@@ -26,6 +26,9 @@ user_sessions: dict[int, dict] = {}
 
 # (chat_id, media_group_id) -> [file_id, ...]  (для альбомов)
 album_sessions: dict[tuple[int, str], list[str]] = {}
+
+# Локи на чат, чтобы update_summary не ехал параллельно
+chat_locks: dict[int, asyncio.Lock] = {}
 
 
 # ========= HTTP СЕРВЕР ДЛЯ RENDER =========
@@ -81,38 +84,42 @@ async def update_summary(chat_id: int):
     """
     Всегда отправляет НОВОЕ сообщение с счётчиком
     и удаляет старое, если оно есть.
+    Всё делаем под локом, чтобы не было гонок и
+    не оставались старые сообщения.
     """
-    session = user_sessions.get(chat_id)
-    if not session:
-        return
+    lock = chat_locks.setdefault(chat_id, asyncio.Lock())
+    async with lock:
+        session = user_sessions.get(chat_id)
+        if not session:
+            return
 
-    count = len(session["images"])
-    old_msg_id = session.get("msg_id")
+        count = len(session["images"])
+        old_msg_id = session.get("msg_id")
 
-    if count == 0:
-        # Если больше нет картинок — удалить старое сообщение и обнулить msg_id
+        if count == 0:
+            # Если больше нет картинок — удалить старое сообщение и обнулить msg_id
+            if old_msg_id:
+                try:
+                    await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+                except Exception:
+                    pass
+            session["msg_id"] = None
+            return
+
+        # Сначала отправляем новое сообщение
+        new_msg = await bot.send_message(
+            chat_id,
+            build_summary_text(count),
+            reply_markup=build_keyboard(count),
+        )
+        session["msg_id"] = new_msg.message_id
+
+        # Потом удаляем старое, если было
         if old_msg_id:
             try:
                 await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
-            except Exception:
-                pass
-        session["msg_id"] = None
-        return
-
-    # Сначала отправляем новое сообщение
-    new_msg = await bot.send_message(
-        chat_id,
-        build_summary_text(count),
-        reply_markup=build_keyboard(count),
-    )
-    session["msg_id"] = new_msg.message_id
-
-    # Потом удаляем старое, если было
-    if old_msg_id:
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
-        except Exception as e:
-            print("Delete old summary error:", e)
+            except Exception as e:
+                print("Delete old summary error:", e)
 
 
 # =============== ОБРАБОТКА ФОТО ===============
@@ -318,4 +325,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
