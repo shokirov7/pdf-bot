@@ -1,5 +1,8 @@
 import asyncio
 import io
+import os
+import threading
+from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
@@ -21,6 +24,24 @@ dp = Dispatcher()
 
 # user_id -> {"images": [file_id, ...], "msg_id": int, "chat_id": int}
 user_sessions: dict[int, dict] = {}
+
+
+# =====================================
+# ✅ ФЕЙКОВЫЙ ВЕБ-СЕРВЕР (ОТКЛЮЧАЕТ ПОИСК ПОРТОВ НА RENDER)
+# =====================================
+async def handle(request):
+    return web.Response(text="Bot is running")
+
+def start_fake_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+
+    port = int(os.environ.get("PORT", 8080))
+    web.run_app(app, port=port)
+
+threading.Thread(target=start_fake_server, daemon=True).start()
+# =====================================
+
 
 
 def build_summary_text(count: int) -> str:
@@ -51,18 +72,14 @@ def build_keyboard(count: int) -> InlineKeyboardMarkup:
 async def handle_image(message: Message):
     user_id = message.from_user.id
 
-    # Detect file_id
     if message.photo:
-        photo = message.photo[-1]
-        file_id = photo.file_id
+        file_id = message.photo[-1].file_id
     else:
-        doc = message.document
-        file_id = doc.file_id
+        file_id = message.document.file_id
 
     session = user_sessions.get(user_id)
 
     if session is None:
-        # First image — create session and message
         msg = await message.answer(
             build_summary_text(1),
             reply_markup=build_keyboard(1),
@@ -73,13 +90,10 @@ async def handle_image(message: Message):
             "chat_id": msg.chat.id,
         }
     else:
-        # Add another image
         session["images"].append(file_id)
         count = len(session["images"])
-
         old_msg_id = session["msg_id"]
 
-        # Send NEW summary message with updated counter
         new_msg = await message.answer(
             build_summary_text(count),
             reply_markup=build_keyboard(count),
@@ -88,7 +102,6 @@ async def handle_image(message: Message):
         session["msg_id"] = new_msg.message_id
         session["chat_id"] = new_msg.chat.id
 
-        # Delete old summary message
         try:
             await bot.delete_message(chat_id=message.chat.id, message_id=old_msg_id)
         except Exception as e:
@@ -104,25 +117,22 @@ async def delete_last_image(callback: CallbackQuery):
         await callback.answer("There are no images to delete.", show_alert=True)
         return
 
-    # Remove last image
     session["images"].pop()
     count = len(session["images"])
     old_msg_id = session["msg_id"]
     chat_id = session["chat_id"]
 
     if count == 0:
-        # Session empty — reset everything
         user_sessions.pop(user_id, None)
         try:
             await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
-        except Exception as e:
-            print("Delete summary after all removed error:", e)
+        except:
+            pass
 
         await callback.message.answer(
             "All images have been removed. Send a new image to start again."
         )
     else:
-        # Send updated summary message
         new_msg = await callback.message.answer(
             build_summary_text(count),
             reply_markup=build_keyboard(count),
@@ -130,11 +140,10 @@ async def delete_last_image(callback: CallbackQuery):
         session["msg_id"] = new_msg.message_id
         session["chat_id"] = new_msg.chat.id
 
-        # Delete old summary
         try:
             await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
-        except Exception as e:
-            print("Delete old summary after delete_last error:", e)
+        except:
+            pass
 
     await callback.answer()
 
@@ -154,15 +163,13 @@ async def create_pdf(callback: CallbackQuery):
     chat_id = session["chat_id"]
     msg_id = session["msg_id"]
 
-    # Waiting message
     wait_msg = await callback.message.reply(
-        "Your document is being created, please wait a moment ⏰"
+        "Your document is being created, please wait ⏰"
     )
 
     try:
         images: list[Image.Image] = []
 
-        # Download all images
         for file_id in images_ids:
             file = await bot.get_file(file_id)
             downloaded = await bot.download_file(file.file_path)
@@ -172,7 +179,6 @@ async def create_pdf(callback: CallbackQuery):
         first = images[0]
         others = images[1:]
 
-        # Build PDF
         pdf_io = io.BytesIO()
         if others:
             first.save(pdf_io, format="PDF", save_all=True, append_images=others)
@@ -180,36 +186,29 @@ async def create_pdf(callback: CallbackQuery):
             first.save(pdf_io, format="PDF")
         pdf_io.seek(0)
 
-        pdf_bytes = pdf_io.getvalue()
-        pdf_file = BufferedInputFile(pdf_bytes, filename="document.pdf")
+        pdf_file = BufferedInputFile(pdf_io.getvalue(), filename="document.pdf")
 
-        # Thumbnail
-        thumb_img = first.copy()
-        thumb_img.thumbnail((320, 320))
+        thumb = first.copy()
+        thumb.thumbnail((320, 320))
         thumb_io = io.BytesIO()
-        thumb_img.save(thumb_io, format="JPEG", quality=85)
+        thumb.save(thumb_io, "JPEG", quality=80)
         thumb_io.seek(0)
-        thumb_bytes = thumb_io.getvalue()
-        thumb_file = BufferedInputFile(thumb_bytes, filename="thumb.jpg")
+        thumb_file = BufferedInputFile(thumb_io.getvalue(), filename="thumb.jpg")
 
-        # Delete summary message
         try:
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
-        except Exception as e:
-            print("Delete summary before send pdf error:", e)
+        except:
+            pass
 
         await wait_msg.delete()
 
-        await callback.message.answer_document(
-            pdf_file,
-            thumbnail=thumb_file,
-        )
+        await callback.message.answer_document(pdf_file, thumbnail=thumb_file)
 
     except Exception as e:
-        print("Create PDF error:", e)
+        print("PDF error:", e)
         try:
-            await wait_msg.edit_text("Error while creating the PDF.")
-        except Exception:
+            await wait_msg.edit_text("Error while creating PDF.")
+        except:
             pass
     finally:
         user_sessions.pop(user_id, None)
