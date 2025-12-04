@@ -17,7 +17,7 @@ from aiogram.client.default import DefaultBotProperties
 from PIL import Image
 
 # 🔑 YOUR BOT TOKEN
-BOT_TOKEN = "8204701331:AAGk63tYGLDBqSHkCs3Z-e_h3cFUy7bqkGQ"
+BOT_TOKEN = "8204701331:AAFIbq9WjX9gmy_JQ3cgoTBGGU9v4zKK5Fo"
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=None))
 dp = Dispatcher()
@@ -253,3 +253,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
