@@ -66,7 +66,13 @@ def build_keyboard(count: int) -> InlineKeyboardMarkup:
                     text="Delete last image 🗑",
                     callback_data="delete_last",
                 ),
-            ]
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Delete all images 🧹",
+                    callback_data="delete_all",
+                )
+            ],
         ]
     )
 
@@ -187,6 +193,37 @@ async def delete_last_image(callback: CallbackQuery):
     await callback.answer()
 
 
+# =============== КНОПКА delete_all ===============
+
+@dp.callback_query(F.data == "delete_all")
+async def delete_all_images(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    session = user_sessions.get(chat_id)
+
+    if not session or not session["images"]:
+        await callback.answer("There are no images to delete.", show_alert=True)
+        return
+
+    # Очищаем список изображений
+    session["images"].clear()
+
+    # Удаляем сообщение-счётчик, если есть
+    old_msg_id = session.get("msg_id")
+    if old_msg_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+        except Exception as e:
+            print("Delete summary in delete_all error:", e)
+
+    # Удаляем сессию
+    user_sessions.pop(chat_id, None)
+
+    await callback.message.answer(
+        "All images have been removed. Send a new image to start again."
+    )
+    await callback.answer()
+
+
 # =============== КНОПКА create_pdf ===============
 
 @dp.callback_query(F.data == "create_pdf")
@@ -281,5 +318,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
