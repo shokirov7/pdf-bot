@@ -13,7 +13,6 @@ from aiogram.types import (
     InlineKeyboardButton,
 )
 from aiogram.client.default import DefaultBotProperties
-
 from PIL import Image
 
 # 🔑 YOUR BOT TOKEN
@@ -22,7 +21,7 @@ BOT_TOKEN = "8204701331:AAFIbq9WjX9gmy_JQ3cgoTBGGU9v4zKK5Fo"
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=None))
 dp = Dispatcher()
 
-# chat_id -> {"images": [file_id, ...], "msg_id": int}
+# chat_id -> {"images": [file_id, ...], "msg_id": int | None}
 user_sessions: dict[int, dict] = {}
 
 
@@ -73,52 +72,39 @@ def build_keyboard(count: int) -> InlineKeyboardMarkup:
 async def handle_image(message: Message):
     chat_id = message.chat.id
 
-    # Detect file_id
+    # file_id фотки
     if message.photo:
-        photo = message.photo[-1]
-        file_id = photo.file_id
+        file_id = message.photo[-1].file_id
     else:
-        doc = message.document
-        file_id = doc.file_id
+        file_id = message.document.file_id
 
-    # DEBUG: смотрим, что было до
-    print(f"[handle_image] BEFORE chat={chat_id}, session={user_sessions.get(chat_id)}")
+    # ❗ Сначала гарантированно создаём сессию, БЕЗ await — никаких гонок
+    if chat_id not in user_sessions:
+        user_sessions[chat_id] = {"images": [], "msg_id": None}
 
-    session = user_sessions.get(chat_id)
+    session = user_sessions[chat_id]
+    session["images"].append(file_id)
+    count = len(session["images"])
 
-    if session is None:
-        # Первая картинка в этом чате
+    # Теперь работаем с сообщением-счётчиком
+    if session["msg_id"] is None:
+        # Первое сообщение-суммарка
         msg = await message.answer(
-            build_summary_text(1),
-            reply_markup=build_keyboard(1),
-        )
-        user_sessions[chat_id] = {
-            "images": [file_id],
-            "msg_id": msg.message_id,
-        }
-        count = 1
-    else:
-        # Добавляем картинку в уже существующую сессию
-        session["images"].append(file_id)
-        count = len(session["images"])
-        old_msg_id = session["msg_id"]
-
-        # Новое сообщение с обновлённым количеством
-        new_msg = await message.answer(
             build_summary_text(count),
             reply_markup=build_keyboard(count),
         )
-
-        session["msg_id"] = new_msg.message_id
-
-        # Удаляем старое сообщение-суммарку
+        session["msg_id"] = msg.message_id
+    else:
+        # Обновляем существующее сообщение
         try:
-            await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=session["msg_id"],
+                text=build_summary_text(count),
+                reply_markup=build_keyboard(count),
+            )
         except Exception as e:
-            print("Delete old summary error:", e)
-
-    # DEBUG: что стало после
-    print(f"[handle_image] AFTER chat={chat_id}, count={count}, session={user_sessions.get(chat_id)}")
+            print("edit_message_text error:", e)
 
 
 @dp.callback_query(F.data == "delete_last")
@@ -130,34 +116,33 @@ async def delete_last_image(callback: CallbackQuery):
         await callback.answer("There are no images to delete.", show_alert=True)
         return
 
-    # Remove last image
     session["images"].pop()
     count = len(session["images"])
-    old_msg_id = session["msg_id"]
 
     if count == 0:
-        # Сессия пустая — очищаем
+        # Всё очистили — убираем сообщение и сессию
+        msg_id = session["msg_id"]
         user_sessions.pop(chat_id, None)
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
-        except Exception as e:
-            print("Delete summary after all removed error:", e)
+        if msg_id is not None:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            except Exception as e:
+                print("Delete summary after all removed error:", e)
 
         await callback.message.answer(
             "All images have been removed. Send a new image to start again."
         )
     else:
-        # Обновляем суммарку
-        new_msg = await callback.message.answer(
-            build_summary_text(count),
-            reply_markup=build_keyboard(count),
-        )
-        session["msg_id"] = new_msg.message_id
-
+        # Обновляем счётчик
         try:
-            await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=session["msg_id"],
+                text=build_summary_text(count),
+                reply_markup=build_keyboard(count),
+            )
         except Exception as e:
-            print("Delete old summary after delete_last error:", e)
+            print("edit after delete_last error:", e)
 
     await callback.answer()
 
@@ -173,10 +158,9 @@ async def create_pdf(callback: CallbackQuery):
 
     await callback.answer("Creating PDF...")
 
-    images_ids = session["images"]
+    images_ids = list(session["images"])  # копия на всякий случай
     msg_id = session["msg_id"]
 
-    # Waiting message
     wait_msg = await callback.message.reply(
         "Your document is being created, please wait a moment ⏰"
     )
@@ -184,7 +168,6 @@ async def create_pdf(callback: CallbackQuery):
     try:
         images: list[Image.Image] = []
 
-        # Download all images
         for file_id in images_ids:
             file = await bot.get_file(file_id)
             downloaded = await bot.download_file(file.file_path)
@@ -194,7 +177,6 @@ async def create_pdf(callback: CallbackQuery):
         first = images[0]
         others = images[1:]
 
-        # Build PDF
         pdf_io = io.BytesIO()
         if others:
             first.save(pdf_io, format="PDF", save_all=True, append_images=others)
@@ -205,7 +187,7 @@ async def create_pdf(callback: CallbackQuery):
         pdf_bytes = pdf_io.getvalue()
         pdf_file = BufferedInputFile(pdf_bytes, filename="document.pdf")
 
-        # Thumbnail
+        # Миниатюра
         thumb_img = first.copy()
         thumb_img.thumbnail((320, 320))
         thumb_io = io.BytesIO()
@@ -214,11 +196,12 @@ async def create_pdf(callback: CallbackQuery):
         thumb_bytes = thumb_io.getvalue()
         thumb_file = BufferedInputFile(thumb_bytes, filename="thumb.jpg")
 
-        # Delete summary message
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
-        except Exception as e:
-            print("Delete summary before send pdf error:", e)
+        # Удаляем сообщение-суммарку
+        if msg_id is not None:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            except Exception as e:
+                print("Delete summary before send pdf error:", e)
 
         await wait_msg.delete()
 
@@ -240,7 +223,7 @@ async def create_pdf(callback: CallbackQuery):
 @dp.message()
 async def fallback(message: Message):
     await message.answer(
-        "Send me images and I will prepare them for PDF creation."
+        "Send me images and then press “Create document” to get PDF."
     )
 
 
