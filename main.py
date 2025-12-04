@@ -16,13 +16,16 @@ from aiogram.client.default import DefaultBotProperties
 from PIL import Image
 
 # 🔑 YOUR BOT TOKEN
-BOT_TOKEN = "8204701331:AAEjKbrQ75lVCtGwFHon9CTAq9hhT7so6jc"
+BOT_TOKEN = "8204701331:AAFIbq9WjX9gmy_JQ3cgoTBGGU9v4zKK5Fo"
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=None))
 dp = Dispatcher()
 
 # chat_id -> {"images": [file_id, ...], "msg_id": int | None}
 user_sessions: dict[int, dict] = {}
+
+# (chat_id, media_group_id) -> [file_id, ...]  (для альбомов)
+album_sessions: dict[tuple[int, str], list[str]] = {}
 
 
 # ========= HTTP СЕРВЕР ДЛЯ RENDER =========
@@ -42,7 +45,7 @@ async def start_web_server():
     print(f"Web server listening on port {port}")
 
 
-# =============== ЛОГИКА БОТА ===============
+# =============== ВСПОМОГАТЕЛЬНОЕ ===============
 
 def build_summary_text(count: int) -> str:
     return (
@@ -68,44 +71,92 @@ def build_keyboard(count: int) -> InlineKeyboardMarkup:
     )
 
 
+async def update_summary(chat_id: int):
+    """
+    Всегда отправляет НОВОЕ сообщение с счётчиком
+    и удаляет старое, если оно есть.
+    """
+    session = user_sessions.get(chat_id)
+    if not session:
+        return
+
+    count = len(session["images"])
+    old_msg_id = session.get("msg_id")
+
+    if count == 0:
+        # Если больше нет картинок — удалить старое сообщение и обнулить msg_id
+        if old_msg_id:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+            except Exception:
+                pass
+        session["msg_id"] = None
+        return
+
+    # Сначала отправляем новое сообщение
+    new_msg = await bot.send_message(
+        chat_id,
+        build_summary_text(count),
+        reply_markup=build_keyboard(count),
+    )
+    session["msg_id"] = new_msg.message_id
+
+    # Потом удаляем старое, если было
+    if old_msg_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+        except Exception as e:
+            print("Delete old summary error:", e)
+
+
+# =============== ОБРАБОТКА ФОТО ===============
+
 @dp.message(F.photo | (F.document & F.document.mime_type.startswith("image/")))
 async def handle_image(message: Message):
     chat_id = message.chat.id
 
-    # file_id фотки
     if message.photo:
         file_id = message.photo[-1].file_id
     else:
         file_id = message.document.file_id
 
-    # ❗ Сначала гарантированно создаём сессию, БЕЗ await — никаких гонок
     if chat_id not in user_sessions:
         user_sessions[chat_id] = {"images": [], "msg_id": None}
-
     session = user_sessions[chat_id]
-    session["images"].append(file_id)
-    count = len(session["images"])
 
-    # Теперь работаем с сообщением-счётчиком
-    if session["msg_id"] is None:
-        # Первое сообщение-суммарка
-        msg = await message.answer(
-            build_summary_text(count),
-            reply_markup=build_keyboard(count),
-        )
-        session["msg_id"] = msg.message_id
+    media_group_id = message.media_group_id
+
+    if media_group_id:
+        # Альбом — копим отдельно, потом разом добавим
+        key = (chat_id, media_group_id)
+        if key not in album_sessions:
+            album_sessions[key] = []
+            asyncio.create_task(process_album(chat_id, media_group_id))
+        album_sessions[key].append(file_id)
     else:
-        # Обновляем существующее сообщение
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=session["msg_id"],
-                text=build_summary_text(count),
-                reply_markup=build_keyboard(count),
-            )
-        except Exception as e:
-            print("edit_message_text error:", e)
+        # Одиночная картинка
+        session["images"].append(file_id)
+        await update_summary(chat_id)
 
+
+async def process_album(chat_id: int, media_group_id: str):
+    await asyncio.sleep(2)  # ждём, пока приедут все фотки альбома
+
+    key = (chat_id, media_group_id)
+    file_ids = album_sessions.pop(key, [])
+
+    if not file_ids:
+        return
+
+    if chat_id not in user_sessions:
+        user_sessions[chat_id] = {"images": [], "msg_id": None}
+    session = user_sessions[chat_id]
+
+    session["images"].extend(file_ids)
+    await update_summary(chat_id)
+
+
+# =============== КНОПКА delete_last ===============
 
 @dp.callback_query(F.data == "delete_last")
 async def delete_last_image(callback: CallbackQuery):
@@ -117,35 +168,26 @@ async def delete_last_image(callback: CallbackQuery):
         return
 
     session["images"].pop()
-    count = len(session["images"])
 
-    if count == 0:
-        # Всё очистили — убираем сообщение и сессию
-        msg_id = session["msg_id"]
-        user_sessions.pop(chat_id, None)
-        if msg_id is not None:
+    if len(session["images"]) == 0:
+        # Удаляем последнее сообщение и очищаем сессию
+        old_msg_id = session.get("msg_id")
+        if old_msg_id:
             try:
-                await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
             except Exception as e:
                 print("Delete summary after all removed error:", e)
-
+        user_sessions.pop(chat_id, None)
         await callback.message.answer(
             "All images have been removed. Send a new image to start again."
         )
     else:
-        # Обновляем счётчик
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=session["msg_id"],
-                text=build_summary_text(count),
-                reply_markup=build_keyboard(count),
-            )
-        except Exception as e:
-            print("edit after delete_last error:", e)
+        await update_summary(chat_id)
 
     await callback.answer()
 
+
+# =============== КНОПКА create_pdf ===============
 
 @dp.callback_query(F.data == "create_pdf")
 async def create_pdf(callback: CallbackQuery):
@@ -158,8 +200,8 @@ async def create_pdf(callback: CallbackQuery):
 
     await callback.answer("Creating PDF...")
 
-    images_ids = list(session["images"])  # копия на всякий случай
-    msg_id = session["msg_id"]
+    images_ids = list(session["images"])
+    msg_id = session.get("msg_id")
 
     wait_msg = await callback.message.reply(
         "Your document is being created, please wait a moment ⏰"
@@ -196,8 +238,8 @@ async def create_pdf(callback: CallbackQuery):
         thumb_bytes = thumb_io.getvalue()
         thumb_file = BufferedInputFile(thumb_bytes, filename="thumb.jpg")
 
-        # Удаляем сообщение-суммарку
-        if msg_id is not None:
+        # Удаляем последнее сообщение-счётчик
+        if msg_id:
             try:
                 await bot.delete_message(chat_id=chat_id, message_id=msg_id)
             except Exception as e:
@@ -220,12 +262,16 @@ async def create_pdf(callback: CallbackQuery):
         user_sessions.pop(chat_id, None)
 
 
+# =============== ФОЛБЭК ===============
+
 @dp.message()
 async def fallback(message: Message):
     await message.answer(
-        "Send me images and then press “Create document” to get PDF."
+        "Send me images (single or album), then press “Create document” to get PDF."
     )
 
+
+# =============== ЗАПУСК ===============
 
 async def main():
     web_task = asyncio.create_task(start_web_server())
@@ -235,4 +281,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
