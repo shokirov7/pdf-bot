@@ -22,7 +22,6 @@ BOT_TOKEN = "8204701331:AAFIbq9WjX9gmy_JQ3cgoTBGGU9v4zKK5Fo"
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=None))
 dp = Dispatcher()
 
-# ✅ Теперь сессии по chat_id, а не по user_id
 # chat_id -> {"images": [file_id, ...], "msg_id": int}
 user_sessions: dict[int, dict] = {}
 
@@ -82,6 +81,9 @@ async def handle_image(message: Message):
         doc = message.document
         file_id = doc.file_id
 
+    # DEBUG: смотрим, что было до
+    print(f"[handle_image] BEFORE chat={chat_id}, session={user_sessions.get(chat_id)}")
+
     session = user_sessions.get(chat_id)
 
     if session is None:
@@ -94,6 +96,7 @@ async def handle_image(message: Message):
             "images": [file_id],
             "msg_id": msg.message_id,
         }
+        count = 1
     else:
         # Добавляем картинку в уже существующую сессию
         session["images"].append(file_id)
@@ -113,6 +116,9 @@ async def handle_image(message: Message):
             await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
         except Exception as e:
             print("Delete old summary error:", e)
+
+    # DEBUG: что стало после
+    print(f"[handle_image] AFTER chat={chat_id}, count={count}, session={user_sessions.get(chat_id)}")
 
 
 @dp.callback_query(F.data == "delete_last")
@@ -239,7 +245,6 @@ async def fallback(message: Message):
 
 
 async def main():
-    # одновременно поднимаем HTTP-сервер и бота
     web_task = asyncio.create_task(start_web_server())
     bot_task = asyncio.create_task(dp.start_polling(bot))
     await asyncio.gather(web_task, bot_task)
@@ -247,4 +252,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
